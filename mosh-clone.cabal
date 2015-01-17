@@ -26,9 +26,20 @@ executable mosh-intercept
   main-is:             Main.hs
   -- other-extensions:    
   build-depends:       base
+                     , async
+                     , base64-bytestring
+                     , bytestring
+                     , cereal
+                     , cipher-aes128
+                     , daemons
+                     , errors
+                     , lens
+                     , network
+                     , process
   hs-source-dirs:      intercept
   default-language:    Haskell2010
-  -- default-extensions:  
+  default-extensions:  OverloadedStrings
+                     , TemplateHaskell
   GHC-Options:         -Wall -Werror
 
 test-suite tests
