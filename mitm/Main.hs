@@ -1,12 +1,18 @@
+-- aeson
+import qualified Data.Aeson as J
+
 -- async
 import Control.Concurrent.Async
 
 -- base
 import Control.Applicative
 import Control.Concurrent (threadDelay)
+import Control.Exception (bracket)
 import Control.Monad
 import Data.List
+import Data.Monoid
 import System.Environment (getArgs)
+import System.IO
 
 -- base64-bytestring
 import qualified Data.ByteString.Base64 as B64
@@ -35,8 +41,49 @@ import Network.Socket.ByteString
 -- lens
 import Control.Lens
 
+-- pipes
+import Pipes
+import qualified Pipes.Prelude as P
+
+-- pipes-aeson
+import qualified Pipes.Aeson as PJ
+
+-- pipes-bytestring
+import qualified Pipes.ByteString as PB
+
 -- process
 import System.Process
+
+-- text
+import Data.Text (Text)
+
+-- unordered-containers
+import qualified Data.HashMap.Strict as HM
+
+
+type LogEntry = J.Object
+type LogT = Producer LogEntry
+type LogIO = LogT IO
+
+(-:) :: J.ToJSON json => Text -> json -> (Text, J.Value)
+key -: value = (key, J.toJSON value)
+
+(--:) :: Text -> Text -> (Text, J.Value)
+(--:) = (-:)
+
+logM :: Monad m => [(Text, J.Value)] -> LogT m ()
+logM = yield . HM.fromList
+
+logToFile :: String -> LogT IO a -> IO a
+logToFile nf process
+        = bracket (openFile nf AppendMode) hClose
+          $ \h -> do
+                hSetBuffering h LineBuffering
+                runEffect
+                    $ process
+                      >-> for cat PJ.encodeObject
+                      >-> P.map (<> "\n")
+                      >-> PB.toHandle h
 
 
 $(declareLenses [d|
@@ -110,25 +157,36 @@ startLocalServer key = do
                 "",
                 "This is mosh-mitm."]
 
-relay :: ToServer -> ToClient -> IO ()
-relay server client = join . runConcurrently
+relay :: ToServer -> ToClient -> LogIO ()
+relay server client = join . lift . runConcurrently
         $ return () <$ Concurrently (threadDelay 1000000000 {-MICROseconds-})
           <|> onPacketFromClient
               <$> Concurrently (recvFrom (client ^. clientSocket) 4096)
           <|> onPacketFromServer <$> Concurrently (recv server 4096)
     where
         onPacketFromClient (packet, newAddress) = do
-                _count <- send server packet
+                count <- lift $ send server packet
+                logM ["what" --: "relayed UDP packet",
+                      "direction" --: "client-server",
+                      "count-bytes-received" -: B.length packet,
+                      "count-bytes-sent" -: count]
                 relay server (clientAddress .~ Just newAddress $ client)
         onPacketFromServer packet = do
-                _count
-                 <- maybe (return 0) (sendTo (client ^. clientSocket) packet)
+                count
+                 <- maybe (return 0)
+                          (lift . sendTo (client ^. clientSocket) packet)
                     $ client ^. clientAddress
+                logM ["what" --: "relayed UDP packet",
+                      "direction" --: "server-client",
+                      "count-bytes-received" -: B.length packet,
+                      "count-bytes-sent" -: count]
                 relay server client
 
 main :: IO ()
 main = withSocketsDo $ do
         (key, remoteServer) <- startRemoteServer =<< getArgs
         localServer <- startLocalServer key
-        runDetached Nothing DevNull $ relay remoteServer localServer
+        runDetached Nothing DevNull
+            . logToFile "/home/dave/tmp/mosh-mitm.log"
+            $ relay remoteServer localServer
 
