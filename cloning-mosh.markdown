@@ -4,10 +4,12 @@ What's novel about mosh?
 
 1.  State Synchronisation Protocol
 
-     *  low-latency object synchronisation (e.g. treat keyboard input and screen display as objects)
+     *  low-latency object synchronisation (e.g. treat keyboard input and screen
+        display as objects)
      *  client roaming
      *  cope well with lossy network paths
-     *  survive client suspend/resume (server treats it as temporary network loss)
+     *  survive client suspend/resume (server treats it as temporary network
+        loss)
      *  **potentially useful for other low-latency communication applications**
 
 2.  Predictive Local Echo
@@ -38,10 +40,12 @@ What's novel about mosh?
 
 Data travels over UDP.
 
-Client may roam; server may not.  Server sends to the address+port from which it received the most recent genuine packet.
+Client may roam; server may not.  Server sends to the address+port from which it
+received the most recent genuine packet.
 Server port is specified by server while bootstrapping.
 
-Estimating round-trip time and its variation: use modified version of [RFC 6298][]:
+Estimating round-trip time and its variation: use modified version of
+[RFC 6298][]:
 
 >    *  RTT --- round-trip time
 >    *  SRTT --- smoothed round-trip time
@@ -57,7 +61,8 @@ Estimating round-trip time and its variation: use modified version of [RFC 6298]
 >
 >   1.  RTT~0~ = 1s
 >
->   2.  On initial RTT measurement R (or optionally after too many retransmission timeouts):
+>   2.  On initial RTT measurement R (or optionally after too many
+>       retransmission timeouts):
 >        *  new SRTT := R
 >        *  new RTTVAR := R / 2
 >
@@ -84,15 +89,20 @@ Packet format (see [Packet::tostring()][]):
 
 1.  64 bit nonce (big-endian, network byte order; see [Nonce::Nonce()][])
      *  high bit is 1 for server to client, 0 for client to server
-     *  lower 63 bits are a counter, starting at 0 (see next\_seq in [Connection::new_packet()][] and [Connection::Connection()][])
-     *  nonce as fed to encryption routines is 96 bits long, padded with 0s at the start
+     *  lower 63 bits are a counter, starting at 0 (see next\_seq in
+        [Connection::new_packet()][] and [Connection::Connection()][])
+     *  nonce as fed to encryption routines is 96 bits long, padded with 0s at
+        the start
 2.  encrypted payload
      *  lower 16 bits of local ms timer (big-endian, network byte order)
-     *  lower 16 bits of last timestamp received (big-endian, network byte order), adjusted for how long we've held it;
-        \~0 if we have not received a new timestamp within the past second (see [Connection::new_packet()])
+     *  lower 16 bits of last timestamp received (big-endian, network byte
+        order), adjusted for how long we've held it;
+        \~0 if we have not received a new timestamp within the past second (see
+        [Connection::new_packet()])
      *  payload from transport layer
 
-There is no associated data (which OCB authenticates but does not encrypt), apart from the nonce.
+There is no associated data (which OCB authenticates but does not encrypt),
+apart from the nonce.
 
 Encryption parameters (see [Session::Session()][] and [ae_init()][]):
 
@@ -100,7 +110,8 @@ Encryption parameters (see [Session::Session()][] and [ae_init()][]):
  *  nonce length = 96 bits
  *  tag length = 128 bits
 
-Die after sending 2^47^ blocks (not packets) in either direction, to preserve OCB's privacy and authenticity properties.
+Die after sending 2^47^ blocks (not packets) in either direction, to preserve
+OCB's privacy and authenticity properties.
 
 [OCB mode]: http://en.wikipedia.org/wiki/OCB_mode
 [src/crypto/ocb.cc:2]: https://github.com/keithw/mosh/blob/688bf21b079c7adf30b87e0f4d8b75e709d5d161/src/crypto/ocb.cc#L2
@@ -118,10 +129,15 @@ Die after sending 2^47^ blocks (not packets) in either direction, to preserve OC
 
 Transports diffs from specified states: messages are idempotent.
 
-Diff is encapsulated in an `Instruction` defined using protocol buffers (use [hprotoc][] to generate Haskell code), compressed using zlib (see [src/network/compressor.cc][]) and
-then fragmented manually to ensure each UDP packet is sent as a single IP packet and not further fragmented en route.
-No attempt is made to make individual packets meaningful on their own: packets are split into MTU-sized chunks.
-See [TransportSender<>::send_in_fragments()][] and [Fragmenter::make_fragments()].
+Diff is encapsulated in an `Instruction` defined using protocol buffers (use
+[hprotoc][] to generate Haskell code), compressed using zlib (see
+[src/network/compressor.cc][]) and
+then fragmented manually to ensure each UDP packet is sent as a single IP packet
+and not further fragmented en route.
+No attempt is made to make individual packets meaningful on their own: packets
+are split into MTU-sized chunks.
+See [TransportSender<>::send_in_fragments()][] and
+[Fragmenter::make_fragments()].
 
 Format of a fragment (see [Fragment::tostring()][] and [class Fragment][]):
 
