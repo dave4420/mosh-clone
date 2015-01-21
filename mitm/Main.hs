@@ -1,3 +1,5 @@
+import Mosh
+
 -- aeson
 import qualified Data.Aeson as J
 
@@ -23,7 +25,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 
 -- cereal
-import qualified Data.Serialize
+import Data.Serialize
 
 -- cipher-aes128
 import Crypto.Cipher.AES128
@@ -65,14 +67,17 @@ type LogEntry = J.Object
 type LogT = Producer LogEntry
 type LogIO = LogT IO
 
-(-:) :: J.ToJSON json => Text -> json -> (Text, J.Value)
-key -: value = (key, J.toJSON value)
+(-:) :: J.ToJSON json => Text -> json -> Maybe (Text, J.Value)
+key -: value = Just (key, J.toJSON value)
 
-(--:) :: Text -> Text -> (Text, J.Value)
+(--:) :: Text -> Text -> Maybe (Text, J.Value)
 (--:) = (-:)
 
-logM :: Monad m => [(Text, J.Value)] -> LogT m ()
-logM = yield . HM.fromList
+(-?:) :: J.ToJSON json => Text -> Maybe json -> Maybe (Text, J.Value)
+key -?: value = (key -:) =<< value
+
+logM :: Monad m => [Maybe (Text, J.Value)] -> LogT m ()
+logM = yield . HM.fromList . catMaybes
 
 logToFile :: String -> LogT IO a -> IO a
 logToFile nf process
@@ -165,22 +170,27 @@ relay server client = join . lift . runConcurrently
           <|> onPacketFromServer <$> Concurrently (recv server 4096)
     where
         onPacketFromClient (packet, newAddress) = do
-                count <- lift $ send server packet
-                logM ["what" --: "relayed UDP packet",
-                      "direction" --: "client-server",
-                      "count-bytes-received" -: B.length packet,
-                      "count-bytes-sent" -: count]
+                cbSent <- lift $ send server packet
+                logIt "client-server" packet cbSent
                 relay server (clientAddress .~ Just newAddress $ client)
         onPacketFromServer packet = do
-                count
+                cbSent
                  <- maybe (return 0)
                           (lift . sendTo (client ^. clientSocket) packet)
                     $ client ^. clientAddress
-                logM ["what" --: "relayed UDP packet",
-                      "direction" --: "server-client",
-                      "count-bytes-received" -: B.length packet,
-                      "count-bytes-sent" -: count]
+                logIt "server-client" packet cbSent
                 relay server client
+        logIt direction bs cbSent
+                = logM ["what" --: "relayed UDP packet",
+                        "direction" --: direction,
+                        "count-bytes-received" -: B.length bs,
+                        "count-bytes-sent" -: cbSent,
+                        "decoding-error" -?: decodingError,
+                        "nonce" -?: (fmap . view) packetNonce packet]
+            where
+                packet' = decode bs
+                decodingError = (hush . flipE) packet'
+                packet = hush packet'
 
 main :: IO ()
 main = withSocketsDo $ do

@@ -147,6 +147,8 @@ Format of a fragment (see [Fragment::tostring()][] and [class Fragment][]):
      *  lower 15 bits are the fragment number (first fragment is 0)
  *  remainder is a chunk of compressed payload
 
+Fragments are then encrypted as above before being sent as a UDP packet.
+
 Not immediately clear how the MTU is detected (MTU of last resort is 500 bytes).
 
 [src/network/compressor.cc]: https://github.com/keithw/mosh/blob/688bf21b079c7adf30b87e0f4d8b75e709d5d161/src/network/compressor.cc

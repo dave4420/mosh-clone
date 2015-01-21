@@ -13,21 +13,27 @@ build-type:          Simple
 cabal-version:       >=1.10
 
 library
-  -- exposed-modules:     
+  exposed-modules:     Mosh
   -- other-modules:       
   -- other-extensions:    
-  build-depends:       base
+  build-depends:       aeson
+                     , base
+                     , bytestring
+                     , cereal
+                     , lens
   hs-source-dirs:      src
   default-language:    Haskell2010
-  -- default-extensions:  
+  default-extensions:  OverloadedStrings
+                     , TemplateHaskell
   GHC-Options:         -Wall -Werror
 
 executable mosh-mitm
   main-is:             Main.hs
   -- other-extensions:    
-  build-depends:       base
+  build-depends:       mosh-clone
                      , aeson
                      , async
+                     , base
                      , base64-bytestring
                      , bytestring
                      , cereal
@@ -52,7 +58,11 @@ test-suite tests
   type:                exitcode-stdio-1.0
   main-is:             Main.hs
   -- other-extensions:    
-  build-depends:       base
+  build-depends:       mosh-clone
+                     , base
+                     , bytestring
+                     , cereal
+                     , errors
                      , QuickCheck == 2.*
                      , test-framework
                      , test-framework-quickcheck2
