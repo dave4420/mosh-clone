@@ -98,7 +98,7 @@ $(declareLenses [d|
 type ToServer = Socket -- ^ connected UDP socket
 
 
-startRemoteServer :: [String] -> IO (AESKey128, ToServer)
+startRemoteServer :: [String] -> IO (OcbKey, ToServer)
 startRemoteServer args = do
         (_hInMay, hOutMay, hErrMay, hProc)
          <- createProcess (proc "mosh-server" args) {std_out = CreatePipe,
@@ -134,14 +134,12 @@ startRemoteServer args = do
                 port <- readMay (BC.unpack bs)
                 guard (1 <= port && port <= 65535)
                 return $ fromInteger port
-        parseKey :: ByteString -> Maybe AESKey128
+        parseKey :: ByteString -> Maybe OcbKey
         parseKey bs = do
                 guard (B.length bs == 22)
-                let key = B64.decodeLenient bs
-                guard (B.length key == 16)
-                buildKey key
+                hush . decode . B64.decodeLenient $ bs
 
-startLocalServer :: AESKey128 -> IO ToClient
+startLocalServer :: OcbKey -> IO ToClient
 startLocalServer key = do
         sock <- socket AF_INET Datagram defaultProtocol
         bind sock $ SockAddrInet (PortNum 0) 0
@@ -159,7 +157,7 @@ startLocalServer key = do
                 "",
                 "This is mosh-mitm."]
 
-relay :: AESKey128 -> ToServer -> ToClient -> LogIO ()
+relay :: OcbKey -> ToServer -> ToClient -> LogIO ()
 relay key server client = join . lift . runConcurrently
         $ return () <$ Concurrently (threadDelay 1000000000 {-MICROseconds-})
           <|> onPacketFromClient

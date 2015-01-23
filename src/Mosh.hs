@@ -1,9 +1,10 @@
 module Mosh (
         module Mosh,
-        AESKey128,
-        buildKey,
+        OcbKey,
 )
 where
+
+import Mosh.Crypto.Key
 
 -- aeson
 import qualified Data.Aeson as J
@@ -141,10 +142,10 @@ instance Serialize Fragment where
 --    *  no associated data
 --    *  tag length = 128 bits
 
-ocbAesEncrypt :: AESKey128 -> Nonce -> ByteString -> ByteString
+ocbAesEncrypt :: OcbKey -> Nonce -> ByteString -> ByteString
 ocbAesEncrypt key = ocbAesEncrypt' key . expandNonce
 
-ocbAesEncrypt' :: AESKey128 -> ByteString -> ByteString -> ByteString
+ocbAesEncrypt' :: OcbKey -> ByteString -> ByteString -> ByteString
 ocbAesEncrypt' key nonce96 plaintext = let
         (plains, plainStar) = slicePlaintext plaintext
         (ciphers, cipherStar, tag)
@@ -158,10 +159,11 @@ ocbAesEncrypt' key nonce96 plaintext = let
         round' plainblock i = do
                 (prevOffset, prevChecksum) <- S.get
                 let nextOffset = traceBS ("Offset_" ++ show i) $
-                                 prevOffset `xorBS` (ls !! (ntz i))
+                                 prevOffset `xorBS` (ocbLAt key (ntz i))
                     cipherblock = nextOffset
-                                  `xorBS` encryptBlock key (plainblock
-                                                            `xorBS` nextOffset)
+                                  `xorBS` encryptBlock
+                                          (ocbKey key)
+                                          (plainblock `xorBS` nextOffset)
                     nextChecksum = traceBS ("Checksum_" ++ show i) $
                                    prevChecksum `xorBS` plainblock
                 S.put (nextOffset, nextChecksum)
@@ -171,8 +173,8 @@ ocbAesEncrypt' key nonce96 plaintext = let
                              | otherwise = do
                 (prevOffset, prevChecksum) <- S.get
                 let nextOffset = traceBS "Offset_*" $
-                                 prevOffset `xorBS` lStar
-                    pad = encryptBlock key nextOffset
+                                 prevOffset `xorBS` ocbLStar key
+                    pad = encryptBlock (ocbKey key) nextOffset
                     cipherStar = plainStar `xorBS` pad
                     nextChecksum = traceBS "Checksum_*" $
                                    prevChecksum
@@ -182,22 +184,14 @@ ocbAesEncrypt' key nonce96 plaintext = let
 
         computeTag = do
                 (offset, checksum) <- S.get
-                return . encryptBlock key
-                    $ checksum `xorBS` offset `xorBS` lDollar
-
-        -- constants
-        zeroes = B.pack $ replicate 16 0
-
-        -- key-derived values
-        lStar = traceBS "L_*" $ encryptBlock key zeroes
-        lDollar = traceBS "L_$" $ double lStar
-        ls = iterate (traceBS "L_?" . double) (traceBS "L_0" $ double lDollar)
+                return . encryptBlock (ocbKey key)
+                    $ checksum `xorBS` offset `xorBS` ocbLDollar key
 
         -- nonce-derived values
         nonce128 = B.pack [0,0,0,1] <> nonce96
         bottom = traceVar "bottom" . fromIntegral $ B.last nonce128 .&. 63
         kTop = traceBS "kTop:" $
-               encryptBlock key $
+               encryptBlock (ocbKey key) $
                B.init nonce128 <> B.singleton (B.last nonce128 .&. 192)
         stretch = traceBS "stretch:" $
                   kTop <> B.pack (B.zipWith xor (B.take 8 kTop)
@@ -207,10 +201,10 @@ ocbAesEncrypt' key nonce96 plaintext = let
         checksum0 = zeroes
 
 
-ocbAesDecrypt :: AESKey128 -> Nonce -> ByteString -> Maybe ByteString
+ocbAesDecrypt :: OcbKey -> Nonce -> ByteString -> Maybe ByteString
 ocbAesDecrypt key = ocbAesDecrypt' key . expandNonce
 
-ocbAesDecrypt' :: AESKey128 -> ByteString -> ByteString -> Maybe ByteString
+ocbAesDecrypt' :: OcbKey -> ByteString -> ByteString -> Maybe ByteString
 ocbAesDecrypt' key nonce96 cryptotext = do
         (cryptos, cryptoStar, givenTag) <- sliceCiphertext cryptotext
         let (plains, plainStar, computedTag)
@@ -225,10 +219,11 @@ ocbAesDecrypt' key nonce96 cryptotext = do
         round' cipherblock i = do
                 (prevOffset, prevChecksum) <- S.get
                 let nextOffset = traceBS ("Offset_" ++ show i) $
-                                 prevOffset `xorBS` (ls !! (ntz i))
+                                 prevOffset `xorBS` (ocbLAt key (ntz i))
                     plainblock = nextOffset
-                                 `xorBS` decryptBlock key (cipherblock
-                                                           `xorBS` nextOffset)
+                                 `xorBS` decryptBlock
+                                         (ocbKey key)
+                                         (cipherblock `xorBS` nextOffset)
                     nextChecksum = traceBS ("Checksum_" ++ show i) $
                                    prevChecksum `xorBS` plainblock
                 S.put (nextOffset, nextChecksum)
@@ -238,8 +233,8 @@ ocbAesDecrypt' key nonce96 cryptotext = do
                                | otherwise = do
                 (prevOffset, prevChecksum) <- S.get
                 let nextOffset = traceBS "Offset_*" $
-                                 prevOffset `xorBS` lStar
-                    pad = encryptBlock key nextOffset
+                                 prevOffset `xorBS` ocbLStar key
+                    pad = encryptBlock (ocbKey key) nextOffset
                     plainStar = cipherblock `xorBS` pad
                     nextChecksum = traceBS "Checksum_*" $
                                    prevChecksum
@@ -249,22 +244,14 @@ ocbAesDecrypt' key nonce96 cryptotext = do
 
         computeTag = do
                 (offset, checksum) <- S.get
-                return . encryptBlock key
-                    $ checksum `xorBS` offset `xorBS` lDollar
-
-        -- constants
-        zeroes = B.pack $ replicate 16 0
-
-        -- key-derived values
-        lStar = traceBS "L_*" $ encryptBlock key zeroes
-        lDollar = traceBS "L_$" $ double lStar
-        ls = iterate (traceBS "L_?" . double) (traceBS "L_0" $ double lDollar)
+                return . encryptBlock (ocbKey key)
+                    $ checksum `xorBS` offset `xorBS` ocbLDollar key
 
         -- nonce-derived values
         nonce128 = B.pack [0,0,0,1] <> nonce96
         bottom = traceVar "bottom" . fromIntegral $ B.last nonce128 .&. 63
         kTop = traceBS "kTop:" $
-               encryptBlock key $
+               encryptBlock (ocbKey key) $
                B.init nonce128 <> B.singleton (B.last nonce128 .&. 192)
         stretch = traceBS "stretch:" $
                   kTop <> B.pack (B.zipWith xor (B.take 8 kTop)
@@ -279,23 +266,6 @@ ntz :: Int -> Int
 ntz n = f 0 where
         f i | n ^. bitAt i = i
             | otherwise    = f (i + 1)
-
--- The RFC calls out this function as being the only part of the algorithm
--- vulnerable to timing attacks, so attempt to avoid them.
-double :: ByteString -> ByteString
-double bs = dropBits 1 (B.snoc bs 0)
-            `xorBS` B.pack (replicate 15 0
-                            ++ [if B.head bs ^. bitAt 7 then 0x87 else 0])
-
-dropBits :: Int -> ByteString -> ByteString
-dropBits n = f . B.drop nBytes where
-        (nBytes, nBits) = n `divMod` 8
-        f | nBits == 0 = id
-          | otherwise  = B.pack . (B.zipWith g <*> B.drop 1)
-        g x y = shiftL x nBits .|. shiftR y (8 - nBits)
-
-xorBS :: ByteString -> ByteString -> ByteString
-xorBS xs ys = B.pack $ B.zipWith xor xs ys
 
 
 expandNonce :: Nonce -> ByteString

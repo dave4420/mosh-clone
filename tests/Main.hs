@@ -1,4 +1,5 @@
 import Mosh
+import Mosh.Crypto.Key
 
 -- base
 import Control.Applicative
@@ -48,9 +49,10 @@ arbitraryByteStringMinimumLength c
 arbitraryByteStringMaximumLength :: Int -> Gen ByteString
 arbitraryByteStringMaximumLength c = B.take c <$> arbitraryByteString
 
-arbitraryKey :: Gen AESKey128
+arbitraryKey :: Gen OcbKey
 arbitraryKey
-        = maybe arbitraryKey return . buildKey =<< arbitraryByteStringLength 16
+        = maybe arbitraryKey return . buildOcbKey
+          =<< arbitraryByteStringLength 16
 
 
 prop_packetEncodingRoundTrip :: Property
@@ -98,8 +100,8 @@ prop_sliceCiphertextTooShort
         $ \bs -> isNothing (sliceCiphertext bs)
 
 
-sampleKey :: AESKey128
-Just sampleKey = buildKey . B.pack $ [0..15]
+sampleKey :: OcbKey
+Just sampleKey = buildOcbKey . B.pack $ [0..15]
 
 -- (96 bit nonce, plaintext, ciphertext); associated data is empty
 samples :: [(ByteString, ByteString, ByteString)]
