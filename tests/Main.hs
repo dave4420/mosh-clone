@@ -48,6 +48,10 @@ arbitraryByteStringMinimumLength c
 arbitraryByteStringMaximumLength :: Int -> Gen ByteString
 arbitraryByteStringMaximumLength c = B.take c <$> arbitraryByteString
 
+arbitraryKey :: Gen AESKey128
+arbitraryKey
+        = maybe arbitraryKey return . buildKey =<< arbitraryByteStringLength 16
+
 
 prop_packetEncodingRoundTrip :: Property
 prop_packetEncodingRoundTrip = forAll (arbitraryByteStringMinimumLength 8)
@@ -146,3 +150,18 @@ prop_correctlyDecryptOcbAesSamples
     where
         good (nonce96, plaintext, ciphertext)
                 = Just plaintext == ocbAesDecrypt' sampleKey nonce96 ciphertext
+
+prop_correctlyEncryptOcbAesSamples :: Property
+prop_correctlyEncryptOcbAesSamples
+        = length samples === length (filter good samples)
+    where
+        good (nonce96, plaintext, ciphertext)
+                = ciphertext == ocbAesEncrypt' sampleKey nonce96 plaintext
+
+prop_OcbDecryptionReversesOcbEncryption :: Property
+prop_OcbDecryptionReversesOcbEncryption
+        = forAll (Blind <$> arbitraryKey) $ \(Blind key) ->
+          forAll (arbitraryByteStringLength 12) $ \nonce' ->
+          forAll arbitraryByteString $ \plaintext ->
+          Just plaintext === ocbAesDecrypt' key nonce'
+                             (ocbAesEncrypt' key nonce' plaintext)

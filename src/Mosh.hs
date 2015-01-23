@@ -141,9 +141,74 @@ instance Serialize Fragment where
 --    *  no associated data
 --    *  tag length = 128 bits
 
+ocbAesEncrypt :: AESKey128 -> Nonce -> ByteString -> ByteString
+ocbAesEncrypt key = ocbAesEncrypt' key . expandNonce
+
+ocbAesEncrypt' :: AESKey128 -> ByteString -> ByteString -> ByteString
+ocbAesEncrypt' key nonce96 plaintext = let
+        (plains, plainStar) = slicePlaintext plaintext
+        (ciphers, cipherStar, tag)
+                = flip evalState (offset0, checksum0)
+                  $ (,,) <$> zipWithM round' plains [1..]
+                         <*> finalRound plainStar
+                         <*> computeTag
+      in mconcat ciphers <> cipherStar <> tag
+    where
+
+        round' plainblock i = do
+                (prevOffset, prevChecksum) <- S.get
+                let nextOffset = traceBS ("Offset_" ++ show i) $
+                                 prevOffset `xorBS` (ls !! (ntz i))
+                    cipherblock = nextOffset
+                                  `xorBS` encryptBlock key (plainblock
+                                                            `xorBS` nextOffset)
+                    nextChecksum = traceBS ("Checksum_" ++ show i) $
+                                   prevChecksum `xorBS` plainblock
+                S.put (nextOffset, nextChecksum)
+                return cipherblock
+
+        finalRound plainStar | B.null plainStar = return ""
+                             | otherwise = do
+                (prevOffset, prevChecksum) <- S.get
+                let nextOffset = traceBS "Offset_*" $
+                                 prevOffset `xorBS` lStar
+                    pad = encryptBlock key nextOffset
+                    cipherStar = plainStar `xorBS` pad
+                    nextChecksum = traceBS "Checksum_*" $
+                                   prevChecksum
+                                   `xorBS` (plainStar <> B.cons 128 zeroes)
+                S.put (nextOffset, nextChecksum)
+                return cipherStar
+
+        computeTag = do
+                (offset, checksum) <- S.get
+                return . encryptBlock key
+                    $ checksum `xorBS` offset `xorBS` lDollar
+
+        -- constants
+        zeroes = B.pack $ replicate 16 0
+
+        -- key-derived values
+        lStar = traceBS "L_*" $ encryptBlock key zeroes
+        lDollar = traceBS "L_$" $ double lStar
+        ls = iterate (traceBS "L_?" . double) (traceBS "L_0" $ double lDollar)
+
+        -- nonce-derived values
+        nonce128 = B.pack [0,0,0,1] <> nonce96
+        bottom = traceVar "bottom" . fromIntegral $ B.last nonce128 .&. 63
+        kTop = traceBS "kTop:" $
+               encryptBlock key $
+               B.init nonce128 <> B.singleton (B.last nonce128 .&. 192)
+        stretch = traceBS "stretch:" $
+                  kTop <> B.pack (B.zipWith xor (B.take 8 kTop)
+                                                (B.take 8 $ B.drop 1 kTop))
+        offset0 = traceBS "Offset_0" $
+                  B.take cbBlock $ dropBits bottom stretch
+        checksum0 = zeroes
+
+
 ocbAesDecrypt :: AESKey128 -> Nonce -> ByteString -> Maybe ByteString
-ocbAesDecrypt key nonce64
-        = ocbAesDecrypt' key $ B.pack (replicate 4 0) <> encode nonce64
+ocbAesDecrypt key = ocbAesDecrypt' key . expandNonce
 
 ocbAesDecrypt' :: AESKey128 -> ByteString -> ByteString -> Maybe ByteString
 ocbAesDecrypt' key nonce96 cryptotext = do
@@ -208,29 +273,33 @@ ocbAesDecrypt' key nonce96 cryptotext = do
                   B.take cbBlock $ dropBits bottom stretch
         checksum0 = zeroes
 
-        -- auxilliary functions
 
-        -- | number of trailing zero bits
-        ntz :: Int -> Int
-        ntz n = f 0 where
-                f i | n ^. bitAt i = i
-                    | otherwise    = f (i + 1)
+-- | number of trailing zero bits
+ntz :: Int -> Int
+ntz n = f 0 where
+        f i | n ^. bitAt i = i
+            | otherwise    = f (i + 1)
 
-        double bs | B.head bs ^. bitAt 7 = bs' `xorBS` constant
-                  | otherwise            = bs'
-            where
-                bs' = dropBits 1 (B.snoc bs 0)
+double :: ByteString -> ByteString
+double bs | B.head bs ^. bitAt 7 = bs' `xorBS` constant
+          | otherwise            = bs'
+    where
+        bs' = dropBits 1 (B.snoc bs 0)
+        constant = B.pack $ replicate 15 0 ++ [0x87]
 
-                constant = B.pack $ replicate 15 0 ++ [0x87]
+dropBits :: Int -> ByteString -> ByteString
+dropBits n = f . B.drop nBytes where
+        (nBytes, nBits) = n `divMod` 8
+        f | nBits == 0 = id
+          | otherwise  = B.pack . (B.zipWith g <*> B.drop 1)
+        g x y = shiftL x nBits .|. shiftR y (8 - nBits)
 
-        dropBits n = f . B.drop nBytes where
-                (nBytes, nBits) = n `divMod` 8
-                f | nBits == 0 = id
-                  | otherwise  = B.pack . (B.zipWith g <*> B.drop 1)
-                g x y = shiftL x nBits .|. shiftR y (8 - nBits)
+xorBS :: ByteString -> ByteString -> ByteString
+xorBS xs ys = B.pack $ B.zipWith xor xs ys
 
-        xorBS xs ys = B.pack $ B.zipWith xor xs ys
 
+expandNonce :: Nonce -> ByteString
+expandNonce nonce64 = B.pack (replicate 4 0) <> encode nonce64
 
 
 cbBlock, cbTag :: Int
@@ -242,12 +311,15 @@ sliceCiphertext full = do
         let cb = B.length full - cbTag
         guard $ 0 <= cb
         let (nonTag, tag) = B.splitAt cb full
-            (fullSized, leftOvers) = f nonTag
-            f bs | B.length bs < cbBlock = ([], bs)
-                 | otherwise = (begin : rest, final) where
-                    (begin, cont) = B.splitAt cbBlock bs
-                    (rest, final) = f cont
+            (fullSized, leftOvers) = slicePlaintext nonTag
         return (fullSized, leftOvers, tag)
+
+slicePlaintext :: ByteString -> ([ByteString], ByteString)
+slicePlaintext full
+        | B.length full < cbBlock = ([], full)
+        | otherwise               = (begin : rest, final) where
+                (begin, cont) = B.splitAt cbBlock full
+                (rest, final) = slicePlaintext cont
 
 
 trace' :: String -> a -> a
