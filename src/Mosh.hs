@@ -280,12 +280,12 @@ ntz n = f 0 where
         f i | n ^. bitAt i = i
             | otherwise    = f (i + 1)
 
+-- The RFC calls out this function as being the only part of the algorithm
+-- vulnerable to timing attacks, so attempt to avoid them.
 double :: ByteString -> ByteString
-double bs | B.head bs ^. bitAt 7 = bs' `xorBS` constant
-          | otherwise            = bs'
-    where
-        bs' = dropBits 1 (B.snoc bs 0)
-        constant = B.pack $ replicate 15 0 ++ [0x87]
+double bs = dropBits 1 (B.snoc bs 0)
+            `xorBS` B.pack (replicate 15 0
+                            ++ [if B.head bs ^. bitAt 7 then 0x87 else 0])
 
 dropBits :: Int -> ByteString -> ByteString
 dropBits n = f . B.drop nBytes where
