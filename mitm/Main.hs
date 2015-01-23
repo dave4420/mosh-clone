@@ -10,9 +10,11 @@ import Control.Concurrent.Async
 import Control.Applicative
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad
+import Control.Monad hiding (sequence)
 import Data.List
 import Data.Monoid
+import Data.Traversable hiding (for)
+import Prelude hiding (sequence)
 import System.Environment (getArgs)
 import System.IO
 
@@ -164,29 +166,33 @@ relay key server client = join . lift . runConcurrently
               <$> Concurrently (recvFrom (client ^. clientSocket) 4096)
           <|> onPacketFromServer <$> Concurrently (recv server 4096)
     where
+        onPacketFromClient :: (ByteString, SockAddr) -> LogIO ()
         onPacketFromClient (packet, newAddress) = do
-                cbSent <- lift $ send server packet
-                logIt "client-server" packet cbSent
+                forward "client-server" packet (Just $ send server)
                 relay key server (clientAddress .~ Just newAddress $ client)
+        onPacketFromServer :: ByteString -> LogIO ()
         onPacketFromServer packet = do
-                cbSent
-                 <- maybe (return 0)
-                          (lift . sendTo (client ^. clientSocket) packet)
-                    $ client ^. clientAddress
-                logIt "server-client" packet cbSent
+                forward "server-client" packet
+                        (flip (sendTo (client ^. clientSocket))
+                         <$> (client ^. clientAddress))
                 relay key server client
-        logIt direction bs cbSent
-                = logM ["what" --: "relayed UDP packet",
-                        "direction" --: direction,
-                        "count-bytes-received" -: B.length bs,
-                        "count-bytes-sent" -: cbSent,
-                        "packet-decoding-error" -?: packetDecodingError,
-                        "nonce" -?: (fmap . view) packetNonce packet,
-                        "packet-payload-decoding-error"
-                            -?: packetPayloadDecodingError,
-                        "packet-payload" -?: packetPayload_]
+        forward :: Text ->
+                   ByteString ->
+                   Maybe (ByteString -> IO Int) ->
+                   LogIO ()
+        forward direction bsPacketIn sendOn = do
+                cbSent <- lift . sequence $ sendOn <*> pure bsPacketIn
+                logM ["what" --: "relayed UDP packet",
+                      "direction" --: direction,
+                      "count-bytes-received" -: B.length bsPacketIn,
+                      "count-bytes-sent" -?: cbSent,
+                      "packet-decoding-error" -?: packetDecodingError,
+                      "nonce" -?: (fmap . view) packetNonce packet,
+                      "packet-payload-decoding-error"
+                          -?: packetPayloadDecodingError,
+                      "packet-payload" -?: packetPayload_]
             where
-                packet' = decode bs
+                packet' = decode bsPacketIn
                 packetDecodingError = (hush . flipE) packet'
                 packet = hush packet' :: Maybe Packet
                 packetPayload' :: Maybe (Either String PacketPayload)
