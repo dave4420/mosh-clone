@@ -83,7 +83,8 @@ Estimating round-trip time and its variation: use modified version of
 
 (Draft paper §2.2 p3.)
 
-AES-128 in [OCB mode][] (version 3; see [src/crypto/ocb.cc:2][]).
+AES-128 in [OCB mode][] (version 3; see [src/crypto/ocb.cc:2][]), described in
+[RFC 7253].
 
 Packet format (see [Packet::tostring()][]):
 
@@ -121,6 +122,7 @@ OCB's privacy and authenticity properties.
 [Nonce::Nonce()]: https://github.com/keithw/mosh/blob/688bf21b079c7adf30b87e0f4d8b75e709d5d161/src/crypto/crypto.cc#L167
 [Session::Session()]: https://github.com/keithw/mosh/blob/688bf21b079c7adf30b87e0f4d8b75e709d5d161/src/crypto/crypto.cc#L148
 [ae_init()]: https://github.com/keithw/mosh/blob/688bf21b079c7adf30b87e0f4d8b75e709d5d161/src/crypto/ocb.cc#L642
+[RFC 7253]: http://www.rfc-editor.org/rfc/rfc7253.txt
 
 
 ## Transport Layer

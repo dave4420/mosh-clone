@@ -27,9 +27,6 @@ import qualified Data.ByteString.Char8 as BC
 -- cereal
 import Data.Serialize
 
--- cipher-aes128
-import Crypto.Cipher.AES128
-
 -- daemons
 import System.Posix.Daemon
 
@@ -162,8 +159,8 @@ startLocalServer key = do
                 "",
                 "This is mosh-mitm."]
 
-relay :: ToServer -> ToClient -> LogIO ()
-relay server client = join . lift . runConcurrently
+relay :: AESKey128 -> ToServer -> ToClient -> LogIO ()
+relay key server client = join . lift . runConcurrently
         $ return () <$ Concurrently (threadDelay 1000000000 {-MICROseconds-})
           <|> onPacketFromClient
               <$> Concurrently (recvFrom (client ^. clientSocket) 4096)
@@ -172,25 +169,39 @@ relay server client = join . lift . runConcurrently
         onPacketFromClient (packet, newAddress) = do
                 cbSent <- lift $ send server packet
                 logIt "client-server" packet cbSent
-                relay server (clientAddress .~ Just newAddress $ client)
+                relay key server (clientAddress .~ Just newAddress $ client)
         onPacketFromServer packet = do
                 cbSent
                  <- maybe (return 0)
                           (lift . sendTo (client ^. clientSocket) packet)
                     $ client ^. clientAddress
                 logIt "server-client" packet cbSent
-                relay server client
+                relay key server client
         logIt direction bs cbSent
                 = logM ["what" --: "relayed UDP packet",
                         "direction" --: direction,
                         "count-bytes-received" -: B.length bs,
                         "count-bytes-sent" -: cbSent,
-                        "decoding-error" -?: decodingError,
-                        "nonce" -?: (fmap . view) packetNonce packet]
+                        "packet-decoding-error" -?: packetDecodingError,
+                        "nonce" -?: (fmap . view) packetNonce packet,
+                        "packet-payload-decoding-error"
+                            -?: packetPayloadDecodingError,
+                        "packet-payload" -?: packetPayload_]
             where
                 packet' = decode bs
-                decodingError = (hush . flipE) packet'
-                packet = hush packet'
+                packetDecodingError = (hush . flipE) packet'
+                packet = hush packet' :: Maybe Packet
+                packetPayload' :: Maybe (Either String PacketPayload)
+                packetPayload' = do
+                        p <- packet
+                        bs' <- ocbAesDecrypt
+                                key
+                                (p ^. packetNonce)
+                                (p ^. packetPayload)
+                        return . decode $ bs'
+                packetPayloadDecodingError = hush . flipE =<< packetPayload'
+                packetPayload_ = hush =<< packetPayload' :: Maybe PacketPayload
+
 
 main :: IO ()
 main = withSocketsDo $ do
@@ -198,5 +209,5 @@ main = withSocketsDo $ do
         localServer <- startLocalServer key
         runDetached Nothing DevNull
             . logToFile "/home/dave/tmp/mosh-mitm.log"
-            $ relay remoteServer localServer
+            $ relay key remoteServer localServer
 

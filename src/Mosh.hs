@@ -1,4 +1,9 @@
-module Mosh where
+module Mosh (
+        module Mosh,
+        AESKey128,
+        buildKey,
+)
+where
 
 -- aeson
 import qualified Data.Aeson as J
@@ -7,17 +12,27 @@ import qualified Data.Aeson as J
 import Control.Applicative
 import Control.Monad
 import Data.Bits
+import Data.List
+import Data.Monoid
 import Data.Word
+import Debug.Trace
 
 -- bytestring
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as B
 
 -- cereal
-import Data.Serialize
+import Data.Serialize as DS
+
+-- cipher-aes128
+import Crypto.Cipher.AES128
 
 -- lens
 import Control.Lens
 import Data.Bits.Lens
+
+-- transformers
+import Control.Monad.Trans.State.Strict as S
 
 
 getRemainingByteString :: Get ByteString
@@ -62,10 +77,36 @@ $(declareLenses [d|
 
 instance Serialize Packet where
         put the = do
-                put (the ^. packetNonce)
+                DS.put (the ^. packetNonce)
                 putByteString (the ^. packetPayload)
-        get = Packet <$> get <*> getRemainingByteString
+        get = Packet <$> DS.get <*> getRemainingByteString
 
+
+$(declareLenses [d|
+        data PacketPayload = PacketPayload {
+                packetPayloadSender'sTimer :: Word16
+              , packetPayloadLastTimerSenderReceived :: Word16
+              , packetPayloadPayload :: ByteString
+        }
+  |])
+
+instance Serialize PacketPayload where
+        put the = do
+                putWord16be (the ^. packetPayloadSender'sTimer)
+                putWord16be (the ^. packetPayloadLastTimerSenderReceived)
+                putByteString (the ^. packetPayloadPayload)
+        get = PacketPayload <$> getWord16be
+                            <*> getWord16be
+                            <*> getRemainingByteString
+
+instance J.ToJSON PacketPayload where
+        toJSON the
+            = J.object ["senders-timer"
+                            J..= (the ^. packetPayloadSender'sTimer),
+                        "last-timer-sender-received"
+                            J..= (the ^. packetPayloadLastTimerSenderReceived),
+                        "payload-length"
+                            J..= B.length (the ^. packetPayloadPayload)]
 
 {-
 $(declareLenses [d|
@@ -89,3 +130,155 @@ instance Serialize Fragment where
                 payload <- getRemainingByteString
                 return $ Fragment iid (fid .&. 0x7fff) (testBit fid 15) payload
 -}
+
+
+-- OCB encryption is described in RFC 7253.
+
+-- | Hardcoding:
+--    *  key length = 128 bits
+--    *  nonce length = 96 bits
+--        *  method of expanding nonce from 64 bits
+--    *  no associated data
+--    *  tag length = 128 bits
+
+ocbAesDecrypt :: AESKey128 -> Nonce -> ByteString -> Maybe ByteString
+ocbAesDecrypt key nonce64
+        = ocbAesDecrypt' key $ B.pack (replicate 4 0) <> encode nonce64
+
+ocbAesDecrypt' :: AESKey128 -> ByteString -> ByteString -> Maybe ByteString
+ocbAesDecrypt' key nonce96 cryptotext = do
+        (cryptos, cryptoStar, givenTag) <- sliceCiphertext cryptotext
+        let (plains, plainStar, computedTag)
+                = flip evalState (offset0, checksum0)
+                  $ (,,) <$> zipWithM round' cryptos [1..]
+                         <*> finalRound cryptoStar
+                         <*> computeTag
+        guard $ traceBS "tag" computedTag == givenTag
+        return . traceBS "plaintext" $ mconcat plains <> plainStar
+    where
+
+        round' cipherblock i = do
+                (prevOffset, prevChecksum) <- S.get
+                let nextOffset = traceBS ("Offset_" ++ show i) $
+                                 prevOffset `xorBS` (ls !! (ntz i))
+                    plainblock = nextOffset
+                                 `xorBS` decryptBlock key (cipherblock
+                                                           `xorBS` nextOffset)
+                    nextChecksum = traceBS ("Checksum_" ++ show i) $
+                                   prevChecksum `xorBS` plainblock
+                S.put (nextOffset, nextChecksum)
+                return plainblock
+
+        finalRound cipherblock | B.null cipherblock = return ""
+                               | otherwise = do
+                (prevOffset, prevChecksum) <- S.get
+                let nextOffset = traceBS "Offset_*" $
+                                 prevOffset `xorBS` lStar
+                    pad = encryptBlock key nextOffset
+                    plainStar = cipherblock `xorBS` pad
+                    nextChecksum = traceBS "Checksum_*" $
+                                   prevChecksum
+                                   `xorBS` (plainStar <> B.cons 128 zeroes)
+                S.put (nextOffset, nextChecksum)
+                return plainStar
+
+        computeTag = do
+                (offset, checksum) <- S.get
+                return . encryptBlock key
+                    $ checksum `xorBS` offset `xorBS` lDollar
+
+        -- constants
+        zeroes = B.pack $ replicate 16 0
+
+        -- key-derived values
+        lStar = traceBS "L_*" $ encryptBlock key zeroes
+        lDollar = traceBS "L_$" $ double lStar
+        ls = iterate (traceBS "L_?" . double) (traceBS "L_0" $ double lDollar)
+
+        -- nonce-derived values
+        nonce128 = B.pack [0,0,0,1] <> nonce96
+        bottom = traceVar "bottom" . fromIntegral $ B.last nonce128 .&. 63
+        kTop = traceBS "kTop:" $
+               encryptBlock key $
+               B.init nonce128 <> B.singleton (B.last nonce128 .&. 192)
+        stretch = traceBS "stretch:" $
+                  kTop <> B.pack (B.zipWith xor (B.take 8 kTop)
+                                                (B.take 8 $ B.drop 1 kTop))
+        offset0 = traceBS "Offset_0" $
+                  B.take cbBlock $ dropBits bottom stretch
+        checksum0 = zeroes
+
+        -- auxilliary functions
+
+        -- | number of trailing zero bits
+        ntz :: Int -> Int
+        ntz n = f 0 where
+                f i | n ^. bitAt i = i
+                    | otherwise    = f (i + 1)
+
+        double bs | B.head bs ^. bitAt 7 = bs' `xorBS` constant
+                  | otherwise            = bs'
+            where
+                bs' = dropBits 1 (B.snoc bs 0)
+
+                constant = B.pack $ replicate 15 0 ++ [0x87]
+
+        dropBits n = f . B.drop nBytes where
+                (nBytes, nBits) = n `divMod` 8
+                f | nBits == 0 = id
+                  | otherwise  = B.pack . (B.zipWith g <*> B.drop 1)
+                g x y = shiftL x nBits .|. shiftR y (8 - nBits)
+
+        xorBS xs ys = B.pack $ B.zipWith xor xs ys
+
+
+
+cbBlock, cbTag :: Int
+cbBlock = 16
+cbTag = 16
+
+sliceCiphertext :: ByteString -> Maybe ([ByteString], ByteString, ByteString)
+sliceCiphertext full = do
+        let cb = B.length full - cbTag
+        guard $ 0 <= cb
+        let (nonTag, tag) = B.splitAt cb full
+            (fullSized, leftOvers) = f nonTag
+            f bs | B.length bs < cbBlock = ([], bs)
+                 | otherwise = (begin : rest, final) where
+                    (begin, cont) = B.splitAt cbBlock bs
+                    (rest, final) = f cont
+        return (fullSized, leftOvers, tag)
+
+
+trace' :: String -> a -> a
+trace' | tracing   = trace
+       | otherwise = const id
+
+tracing :: Bool
+tracing = False
+
+traceVar :: Show a => String -> a -> a
+traceVar msg x = trace' (msg ++ " = " ++ show x) x where
+
+traceBS :: String -> ByteString -> ByteString
+traceBS message bs = trace' (message ++ showBS bs) bs
+
+showBS :: ByteString -> String
+showBS = concatMap ("\n\t" ++)
+         . map (intercalate " ")
+         . group' 4
+         . map (intercalate ".")
+         . group' 4
+         . map showByte
+         . B.unpack
+
+showByte :: Word8 -> String
+showByte byte = [hex high, hex low] where
+        hex x | 0 <= x && x <= 9   = toEnum $ 48 + fromIntegral x
+              | 10 <= x && x <= 15 = toEnum $ 55 + fromIntegral x
+              | otherwise          = '-'
+        (high, low) = byte `divMod` 16
+
+group' :: Int -> [a] -> [[a]]
+group' _ [] = []
+group' c xs = let (ys, zs) = splitAt c xs in ys : group' c zs
