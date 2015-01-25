@@ -63,19 +63,20 @@ import qualified Data.HashMap.Strict as HM
 
 
 type LogEntry = J.Object
+type LogItem = Maybe (Text, J.Value)
 type LogT = Producer LogEntry
 type LogIO = LogT IO
 
-(-:) :: J.ToJSON json => Text -> json -> Maybe (Text, J.Value)
+(-:) :: J.ToJSON json => Text -> json -> LogItem
 key -: value = Just (key, J.toJSON value)
 
 (--:) :: Text -> Text -> Maybe (Text, J.Value)
 (--:) = (-:)
 
-(-?:) :: J.ToJSON json => Text -> Maybe json -> Maybe (Text, J.Value)
+(-?:) :: J.ToJSON json => Text -> Maybe json -> LogItem
 key -?: value = (key -:) =<< value
 
-logM :: Monad m => [Maybe (Text, J.Value)] -> LogT m ()
+logM :: Monad m => [LogItem] -> LogT m ()
 logM = yield . HM.fromList . catMaybes
 
 logToFile :: String -> LogT IO a -> IO a
@@ -93,14 +94,20 @@ logToFile nf process
 $(declareLenses [d|
         data ToClient = ToClient {
                 clientSocket :: Socket -- ^ disconnected UDP socket
+              , clientKey :: OcbKey
               , clientAddress :: Maybe SockAddr
         }
   |])
 
-type ToServer = Socket -- ^ connected UDP socket
+$(declareLenses [d|
+        data ToServer = ToServer {
+                serverSocket :: Socket -- ^ connected UDP socket
+              , serverKey :: OcbKey
+        }
+  |])
 
 
-startRemoteServer :: [String] -> IO (OcbKey, ToServer)
+startRemoteServer :: [String] -> IO ToServer
 startRemoteServer args = do
         (_hInMay, hOutMay, hErrMay, hProc)
          <- createProcess (proc "mosh-server" args) {std_out = CreatePipe,
@@ -120,7 +127,7 @@ startRemoteServer args = do
             $ parseConnectLine bsOut <|> parseConnectLine bsErr
         sock <- socket AF_INET Datagram defaultProtocol
         connect sock $ SockAddrInet port iNADDR_ANY
-        return (sharedEncryptionKey, sock)
+        return (ToServer sock sharedEncryptionKey)
     where
         parseConnectLine
                 = headMay
@@ -141,14 +148,18 @@ startRemoteServer args = do
                 guard (B.length bs == 22)
                 hush . decode . B64.decodeLenient $ bs
 
-startLocalServer :: OcbKey -> IO ToClient
-startLocalServer key = do
+startLocalServer :: IO ToClient
+startLocalServer = do
+        key
+         <- either fail return
+            <=< withFile "/dev/urandom" ReadMode
+            $ \h -> Data.Serialize.decode <$> B.hGet h 16
         sock <- socket AF_INET Datagram defaultProtocol
         bind sock $ SockAddrInet (PortNum 0) 0
-        B.putStr . message =<< socketPort sock
-        return $ ToClient sock Nothing
+        B.putStr . message key =<< socketPort sock
+        return $ ToClient sock key Nothing
     where
-        message port = BC.unlines [
+        message key port = BC.unlines [
                 "",
                 BC.unwords [
                         "MOSH CONNECT",
@@ -159,59 +170,78 @@ startLocalServer key = do
                 "",
                 "This is mosh-mitm."]
 
-relay :: OcbKey -> ToServer -> ToClient -> LogIO ()
-relay key server client = join . lift . runConcurrently
+
+relay :: ToServer -> ToClient -> LogIO ()
+relay server client = join . lift . runConcurrently
         $ return () <$ Concurrently (threadDelay 1000000000 {-MICROseconds-})
           <|> onPacketFromClient
               <$> Concurrently (recvFrom (client ^. clientSocket) 4096)
-          <|> onPacketFromServer <$> Concurrently (recv server 4096)
+          <|> onPacketFromServer
+              <$> Concurrently (recv (server ^. serverSocket) 4096)
     where
+
         onPacketFromClient :: (ByteString, SockAddr) -> LogIO ()
         onPacketFromClient (packet, newAddress) = do
-                forward "client-server" packet (Just $ send server)
-                relay key server (clientAddress .~ Just newAddress $ client)
+                forward "client-server" packet
+                        (client ^. clientKey)
+                        (server ^. serverKey)
+                        (Just $ send (server ^. serverSocket))
+                relay server (clientAddress .~ Just newAddress $ client)
+
         onPacketFromServer :: ByteString -> LogIO ()
         onPacketFromServer packet = do
                 forward "server-client" packet
+                        (server ^. serverKey)
+                        (client ^. clientKey)
                         (flip (sendTo (client ^. clientSocket))
                          <$> (client ^. clientAddress))
-                relay key server client
+                relay server client
+
         forward :: Text ->
                    ByteString ->
+                   OcbKey ->
+                   OcbKey ->
                    Maybe (ByteString -> IO Int) ->
                    LogIO ()
-        forward direction bsPacketIn sendOn = do
-                cbSent <- lift . sequence $ sendOn <*> pure bsPacketIn
+        forward direction bsPacketIn keyDecrypt keyEncrypt sendOn = do
+                cbSent <- lift . sequence $ sendOn <*> bsPacketOut
                 logM ["what" --: "relayed UDP packet",
                       "direction" --: direction,
                       "count-bytes-received" -: B.length bsPacketIn,
                       "count-bytes-sent" -?: cbSent,
-                      "packet-decoding-error" -?: packetDecodingError,
-                      "nonce" -?: (fmap . view) packetNonce packet,
+                      "packet-decoding-error" -?: packetInDecodingError,
+                      "nonce" -?: (fmap . view) packetNonce packetIn,
                       "packet-payload-decoding-error"
-                          -?: packetPayloadDecodingError,
-                      "packet-payload" -?: packetPayload_]
+                          -?: packetPayloadInDecodingError,
+                      "packet-payload" -?: packetPayloadIn]
             where
-                packet' = decode bsPacketIn
-                packetDecodingError = (hush . flipE) packet'
-                packet = hush packet' :: Maybe Packet
-                packetPayload' :: Maybe (Either String PacketPayload)
-                packetPayload' = do
-                        p <- packet
+                packetIn' = decode bsPacketIn
+                packetInDecodingError = (hush . flipE) packetIn'
+                packetIn = hush packetIn' :: Maybe Packet
+                packetPayloadIn' :: Maybe (Either String PacketPayload)
+                packetPayloadIn' = do
+                        p <- packetIn
                         bs' <- ocbAesDecrypt
-                                key
+                                keyDecrypt
                                 (p ^. packetNonce)
                                 (p ^. packetPayload)
                         return . decode $ bs'
-                packetPayloadDecodingError = hush . flipE =<< packetPayload'
-                packetPayload_ = hush =<< packetPayload' :: Maybe PacketPayload
+                packetPayloadInDecodingError = hush . flipE =<< packetPayloadIn'
+                packetPayloadIn :: Maybe PacketPayload
+                packetPayloadIn = hush =<< packetPayloadIn'
+                packetOut :: Maybe Packet
+                packetOut = Packet <$> (view packetNonce <$> packetIn)
+                                   <*> (ocbAesEncrypt keyEncrypt
+                                        <$> (view packetNonce <$> packetIn)
+                                        <*> (encode <$> packetPayloadIn))
+                bsPacketOut = encode <$> packetOut
 
 
 main :: IO ()
 main = withSocketsDo $ do
-        (key, remoteServer) <- startRemoteServer =<< getArgs
-        localServer <- startLocalServer key
+        remoteServer <- startRemoteServer =<< getArgs
+        localServer <- startLocalServer
         runDetached Nothing DevNull
             . logToFile "/home/dave/tmp/mosh-mitm.log"
-            $ relay key remoteServer localServer
+            $ relay remoteServer localServer
 
