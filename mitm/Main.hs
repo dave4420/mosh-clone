@@ -211,29 +211,28 @@ relay server client = join . lift . runConcurrently
                       "count-bytes-sent" -?: cbSent,
                       "packet-decoding-error" -?: packetInDecodingError,
                       "nonce" -?: (fmap . view) packetNonce packetIn,
-                      "packet-payload-decoding-error"
-                          -?: packetPayloadInDecodingError,
-                      "packet-payload" -?: packetPayloadIn]
+                      "fragment-decoding-error" -?: fragmentInDecodingError,
+                      "fragment" -?: fragmentIn]
             where
                 packetIn' = decode bsPacketIn
                 packetInDecodingError = (hush . flipE) packetIn'
                 packetIn = hush packetIn' :: Maybe Packet
-                packetPayloadIn' :: Maybe (Either String PacketPayload)
-                packetPayloadIn' = do
+                fragmentIn' :: Maybe (Either String Fragment)
+                fragmentIn' = do
                         p <- packetIn
                         bs' <- ocbAesDecrypt
                                 keyDecrypt
                                 (p ^. packetNonce)
                                 (p ^. packetPayload)
                         return . decode $ bs'
-                packetPayloadInDecodingError = hush . flipE =<< packetPayloadIn'
-                packetPayloadIn :: Maybe PacketPayload
-                packetPayloadIn = hush =<< packetPayloadIn'
+                fragmentInDecodingError = hush . flipE =<< fragmentIn'
+                fragmentIn :: Maybe Fragment
+                fragmentIn = hush =<< fragmentIn'
                 packetOut :: Maybe Packet
                 packetOut = Packet <$> (view packetNonce <$> packetIn)
                                    <*> (ocbAesEncrypt keyEncrypt
                                         <$> (view packetNonce <$> packetIn)
-                                        <*> (encode <$> packetPayloadIn))
+                                        <*> (encode <$> fragmentIn))
                 bsPacketOut = encode <$> packetOut
 
 

@@ -83,31 +83,32 @@ instance Serialize Packet where
         get = Packet <$> DS.get <*> getRemainingByteString
 
 
+-- | In the original mosh, the timers are not considered part of the fragment.
 $(declareLenses [d|
-        data PacketPayload = PacketPayload {
-                packetPayloadSender'sTimer :: Word16
-              , packetPayloadLastTimerSenderReceived :: Word16
-              , packetPayloadPayload :: ByteString
+        data Fragment = Fragment {
+                fragmentSender'sTimer :: Word16
+              , fragmentLastTimerSenderReceived :: Word16
+              , fragmentPayload :: ByteString
         }
   |])
 
-instance Serialize PacketPayload where
+instance Serialize Fragment where
         put the = do
-                putWord16be (the ^. packetPayloadSender'sTimer)
-                putWord16be (the ^. packetPayloadLastTimerSenderReceived)
-                putByteString (the ^. packetPayloadPayload)
-        get = PacketPayload <$> getWord16be
-                            <*> getWord16be
-                            <*> getRemainingByteString
+                putWord16be (the ^. fragmentSender'sTimer)
+                putWord16be (the ^. fragmentLastTimerSenderReceived)
+                putByteString (the ^. fragmentPayload)
+        get = Fragment <$> getWord16be
+                       <*> getWord16be
+                       <*> getRemainingByteString
 
-instance J.ToJSON PacketPayload where
+instance J.ToJSON Fragment where
         toJSON the
             = J.object ["senders-timer"
-                            J..= (the ^. packetPayloadSender'sTimer),
+                            J..= (the ^. fragmentSender'sTimer),
                         "last-timer-sender-received"
-                            J..= (the ^. packetPayloadLastTimerSenderReceived),
+                            J..= (the ^. fragmentLastTimerSenderReceived),
                         "payload-length"
-                            J..= B.length (the ^. packetPayloadPayload)]
+                            J..= B.length (the ^. fragmentPayload)]
 
 {-
 $(declareLenses [d|

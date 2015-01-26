@@ -64,16 +64,15 @@ prop_packetDecodingTooShort = forAll (arbitraryByteStringMaximumLength 7)
         $ \bs -> isLeft (decode bs :: Either String Packet)
 
 
-prop_packetPayloadEncodingRoundTrip :: Property
-prop_packetPayloadEncodingRoundTrip
+prop_fragmentEncodingRoundTrip :: Property
+prop_fragmentEncodingRoundTrip
     = forAll (arbitraryByteStringMinimumLength 4)
-        $ \bs -> Right bs
-                 === fmap encode (decode bs :: Either String PacketPayload)
+        $ \bs -> Right bs === fmap encode (decode bs :: Either String Fragment)
 
-prop_packetPayloadDecodingTooShort :: Property
-prop_packetPayloadDecodingTooShort
+prop_fragmentDecodingTooShort :: Property
+prop_fragmentDecodingTooShort
     = forAll (arbitraryByteStringMaximumLength 3)
-        $ \bs -> isLeft (decode bs :: Either String PacketPayload)
+        $ \bs -> isLeft (decode bs :: Either String Fragment)
 
 
 prop_sliceCiphertextRoundTrip :: Property
