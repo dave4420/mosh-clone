@@ -88,32 +88,7 @@ $(declareLenses [d|
         data Fragment = Fragment {
                 fragmentSender'sTimer :: Word16
               , fragmentLastTimerSenderReceived :: Word16
-              , fragmentPayload :: ByteString
-        }
-  |])
-
-instance Serialize Fragment where
-        put the = do
-                putWord16be (the ^. fragmentSender'sTimer)
-                putWord16be (the ^. fragmentLastTimerSenderReceived)
-                putByteString (the ^. fragmentPayload)
-        get = Fragment <$> getWord16be
-                       <*> getWord16be
-                       <*> getRemainingByteString
-
-instance J.ToJSON Fragment where
-        toJSON the
-            = J.object ["senders-timer"
-                            J..= (the ^. fragmentSender'sTimer),
-                        "last-timer-sender-received"
-                            J..= (the ^. fragmentLastTimerSenderReceived),
-                        "payload-length"
-                            J..= B.length (the ^. fragmentPayload)]
-
-{-
-$(declareLenses [d|
-        data Fragment = Fragment {
-                fragmentInstructionID :: Word64
+              , fragmentInstructionID :: Word64
               , fragmentID :: Word16
               , fragmentIsFinal :: Bool
               , fragmentPayload :: ByteString
@@ -122,16 +97,35 @@ $(declareLenses [d|
 
 instance Serialize Fragment where
         put the = do
+                putWord16be (the ^. fragmentSender'sTimer)
+                putWord16be (the ^. fragmentLastTimerSenderReceived)
                 putWord64be (the ^. fragmentInstructionID)
                 putWord16be ((the ^. fragmentID)
                              .|. (if the ^. fragmentIsFinal then 0x8000 else 0))
                 putByteString (the ^. fragmentPayload)
         get = do
+                tSender <- getWord16be
+                tReceived <- getWord16be
                 iid <- getWord64be
                 fid <- getWord16be
                 payload <- getRemainingByteString
-                return $ Fragment iid (fid .&. 0x7fff) (testBit fid 15) payload
--}
+                return $ Fragment tSender tReceived iid (fid .&. 0x7fff)
+                                  (testBit fid 15) payload
+
+instance J.ToJSON Fragment where
+        toJSON the
+            = J.object ["senders-timer"
+                            J..= (the ^. fragmentSender'sTimer),
+                        "last-timer-sender-received"
+                            J..= (the ^. fragmentLastTimerSenderReceived),
+                        "instruction-id"
+                            J..= (the ^. fragmentInstructionID),
+                        "id"
+                            J..= (the ^. fragmentID),
+                        "is-final"
+                            J..= (the ^. fragmentIsFinal),
+                        "payload-length"
+                            J..= B.length (the ^. fragmentPayload)]
 
 
 -- OCB encryption is described in RFC 7253.

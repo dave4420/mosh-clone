@@ -66,12 +66,12 @@ prop_packetDecodingTooShort = forAll (arbitraryByteStringMaximumLength 7)
 
 prop_fragmentEncodingRoundTrip :: Property
 prop_fragmentEncodingRoundTrip
-    = forAll (arbitraryByteStringMinimumLength 4)
+    = forAll (arbitraryByteStringMinimumLength 14)
         $ \bs -> Right bs === fmap encode (decode bs :: Either String Fragment)
 
 prop_fragmentDecodingTooShort :: Property
 prop_fragmentDecodingTooShort
-    = forAll (arbitraryByteStringMaximumLength 3)
+    = forAll (arbitraryByteStringMaximumLength 13)
         $ \bs -> isLeft (decode bs :: Either String Fragment)
 
 
