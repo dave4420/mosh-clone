@@ -1,10 +1,12 @@
 module Mosh (
         module Mosh,
         OcbKey,
+        buildOcbParams,
 )
 where
 
 import Mosh.Crypto.Key
+import Mosh.Crypto.Params
 
 -- aeson
 import qualified Data.Aeson as J
@@ -26,7 +28,7 @@ import qualified Data.ByteString as B
 import Data.Serialize as DS
 
 -- cipher-aes128
-import Crypto.Cipher.AES128
+--import Crypto.Cipher.AES128
 
 -- lens
 import Control.Lens
@@ -47,31 +49,31 @@ instance J.ToJSON Peer where
         toJSON Client = J.String "client"
 
 
-newtype Nonce = Nonce Word64
+newtype MoshNonce = MoshNonce Word64
 
-nonce :: Peer -> Word64 -> Maybe Nonce
-nonce peer counter = do
+moshNonce :: Peer -> Word64 -> Maybe MoshNonce
+moshNonce peer counter = do
         guard $ counter .&. bit 63 == 0
-        return . Nonce . (bitAt 63 .~ (peer == Client)) $ counter
+        return . MoshNonce . (bitAt 63 .~ (peer == Client)) $ counter
 
-nonceCounter :: Getter Nonce Word64
-nonceCounter = to $ \(Nonce n) -> bitAt 63 .~ False $ n
+nonceCounter :: Getter MoshNonce Word64
+nonceCounter = to $ \(MoshNonce n) -> bitAt 63 .~ False $ n
 
-nonceDest :: Getter Nonce Peer
-nonceDest = to $ \(Nonce n) -> if n ^. bitAt 63 then Client else Server
+nonceDest :: Getter MoshNonce Peer
+nonceDest = to $ \(MoshNonce n) -> if n ^. bitAt 63 then Client else Server
 
-instance Serialize Nonce where
-        put (Nonce n) = putWord64be n
-        get = Nonce <$> getWord64be
+instance Serialize MoshNonce where
+        put (MoshNonce n) = putWord64be n
+        get = MoshNonce <$> getWord64be
 
-instance J.ToJSON Nonce where
+instance J.ToJSON MoshNonce where
         toJSON n = J.object ["dest" J..= (n ^. nonceDest),
                              "counter" J..= (n ^. nonceCounter)]
 
 
 $(declareLenses [d|
         data Packet = Packet {
-                packetNonce :: Nonce
+                packetNonce :: MoshNonce
               , packetPayload :: ByteString
         }
   |])
@@ -137,14 +139,11 @@ instance J.ToJSON Fragment where
 --    *  no associated data
 --    *  tag length = 128 bits
 
-ocbAesEncrypt :: OcbKey -> Nonce -> ByteString -> ByteString
-ocbAesEncrypt key = ocbAesEncrypt' key . expandNonce
-
-ocbAesEncrypt' :: OcbKey -> ByteString -> ByteString -> ByteString
-ocbAesEncrypt' key nonce96 plaintext = let
+ocbAesEncrypt :: OcbParams -> ByteString -> ByteString
+ocbAesEncrypt param plaintext = let
         (plains, plainStar) = slicePlaintext plaintext
         (ciphers, cipherStar, tag)
-                = flip evalState (offset0, checksum0)
+                = flip evalState (ocbOffset0 param, zeroes)
                   $ (,,) <$> zipWithM round' plains [1..]
                          <*> finalRound plainStar
                          <*> computeTag
@@ -156,8 +155,7 @@ ocbAesEncrypt' key nonce96 plaintext = let
                 let nextOffset = traceBS ("Offset_" ++ show i) $
                                  prevOffset `xorBS` (ocbLAt key (ntz i))
                     cipherblock = nextOffset
-                                  `xorBS` encryptBlock
-                                          (ocbKey key)
+                                  `xorBS` ocbEncryptBlock param
                                           (plainblock `xorBS` nextOffset)
                     nextChecksum = traceBS ("Checksum_" ++ show i) $
                                    prevChecksum `xorBS` plainblock
@@ -169,7 +167,7 @@ ocbAesEncrypt' key nonce96 plaintext = let
                 (prevOffset, prevChecksum) <- S.get
                 let nextOffset = traceBS "Offset_*" $
                                  prevOffset `xorBS` ocbLStar key
-                    pad = encryptBlock (ocbKey key) nextOffset
+                    pad = ocbEncryptBlock param nextOffset
                     cipherStar = plainStar `xorBS` pad
                     nextChecksum = traceBS "Checksum_*" $
                                    prevChecksum
@@ -179,33 +177,19 @@ ocbAesEncrypt' key nonce96 plaintext = let
 
         computeTag = do
                 (offset, checksum) <- S.get
-                return . encryptBlock (ocbKey key)
+                return . ocbEncryptBlock param
                     $ checksum `xorBS` offset `xorBS` ocbLDollar key
 
-        -- nonce-derived values
-        nonce128 = B.pack [0,0,0,1] <> nonce96
-        bottom = traceVar "bottom" . fromIntegral $ B.last nonce128 .&. 63
-        kTop = traceBS "kTop:" $
-               encryptBlock (ocbKey key) $
-               B.init nonce128 <> B.singleton (B.last nonce128 .&. 192)
-        stretch = traceBS "stretch:" $
-                  kTop <> B.pack (B.zipWith xor (B.take 8 kTop)
-                                                (B.take 8 $ B.drop 1 kTop))
-        offset0 = traceBS "Offset_0" $
-                  B.take cbBlock $ dropBits bottom stretch
-        checksum0 = zeroes
+        key = ocbKey param
 
 
-ocbAesDecrypt :: OcbKey -> Nonce -> ByteString -> Maybe ByteString
-ocbAesDecrypt key = ocbAesDecrypt' key . expandNonce
-
-ocbAesDecrypt' :: OcbKey -> ByteString -> ByteString -> Maybe ByteString
-ocbAesDecrypt' key nonce96 cryptotext = do
-        (cryptos, cryptoStar, givenTag) <- sliceCiphertext cryptotext
+ocbAesDecrypt :: OcbParams -> ByteString -> Maybe ByteString
+ocbAesDecrypt param ciphertext = do
+        (ciphers, cipherStar, givenTag) <- sliceCiphertext ciphertext
         let (plains, plainStar, computedTag)
-                = flip evalState (offset0, checksum0)
-                  $ (,,) <$> zipWithM round' cryptos [1..]
-                         <*> finalRound cryptoStar
+                = flip evalState (ocbOffset0 param, zeroes)
+                  $ (,,) <$> zipWithM round' ciphers [1..]
+                         <*> finalRound cipherStar
                          <*> computeTag
         guard $ traceBS "tag" computedTag == givenTag
         return . traceBS "plaintext" $ mconcat plains <> plainStar
@@ -216,8 +200,7 @@ ocbAesDecrypt' key nonce96 cryptotext = do
                 let nextOffset = traceBS ("Offset_" ++ show i) $
                                  prevOffset `xorBS` (ocbLAt key (ntz i))
                     plainblock = nextOffset
-                                 `xorBS` decryptBlock
-                                         (ocbKey key)
+                                 `xorBS` ocbDecryptBlock param
                                          (cipherblock `xorBS` nextOffset)
                     nextChecksum = traceBS ("Checksum_" ++ show i) $
                                    prevChecksum `xorBS` plainblock
@@ -229,7 +212,7 @@ ocbAesDecrypt' key nonce96 cryptotext = do
                 (prevOffset, prevChecksum) <- S.get
                 let nextOffset = traceBS "Offset_*" $
                                  prevOffset `xorBS` ocbLStar key
-                    pad = encryptBlock (ocbKey key) nextOffset
+                    pad = ocbEncryptBlock param nextOffset
                     plainStar = cipherblock `xorBS` pad
                     nextChecksum = traceBS "Checksum_*" $
                                    prevChecksum
@@ -239,21 +222,10 @@ ocbAesDecrypt' key nonce96 cryptotext = do
 
         computeTag = do
                 (offset, checksum) <- S.get
-                return . encryptBlock (ocbKey key)
+                return . ocbEncryptBlock param
                     $ checksum `xorBS` offset `xorBS` ocbLDollar key
 
-        -- nonce-derived values
-        nonce128 = B.pack [0,0,0,1] <> nonce96
-        bottom = traceVar "bottom" . fromIntegral $ B.last nonce128 .&. 63
-        kTop = traceBS "kTop:" $
-               encryptBlock (ocbKey key) $
-               B.init nonce128 <> B.singleton (B.last nonce128 .&. 192)
-        stretch = traceBS "stretch:" $
-                  kTop <> B.pack (B.zipWith xor (B.take 8 kTop)
-                                                (B.take 8 $ B.drop 1 kTop))
-        offset0 = traceBS "Offset_0" $
-                  B.take cbBlock $ dropBits bottom stretch
-        checksum0 = zeroes
+        key = ocbKey param
 
 
 -- | number of trailing zero bits
@@ -263,13 +235,9 @@ ntz n = f 0 where
             | otherwise    = f (i + 1)
 
 
-expandNonce :: Nonce -> ByteString
-expandNonce nonce64 = B.pack (replicate 4 0) <> encode nonce64
+nonceFromMoshNonce :: MoshNonce -> ByteString
+nonceFromMoshNonce nonce64 = B.pack (replicate 4 0) <> encode nonce64
 
-
-cbBlock, cbTag :: Int
-cbBlock = 16
-cbTag = 16
 
 sliceCiphertext :: ByteString -> Maybe ([ByteString], ByteString, ByteString)
 sliceCiphertext full = do

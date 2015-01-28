@@ -150,19 +150,26 @@ prop_correctlyDecryptOcbAesSamples
         = length samples === length (filter good samples)
     where
         good (nonce96, plaintext, ciphertext)
-                = Just plaintext == ocbAesDecrypt' sampleKey nonce96 ciphertext
+                = maybe False good' $ buildOcbParams sampleKey nonce96
+            where
+                good' params = Just plaintext == ocbAesDecrypt params ciphertext
 
 prop_correctlyEncryptOcbAesSamples :: Property
 prop_correctlyEncryptOcbAesSamples
         = length samples === length (filter good samples)
     where
         good (nonce96, plaintext, ciphertext)
-                = ciphertext == ocbAesEncrypt' sampleKey nonce96 plaintext
+                = maybe False good' $ buildOcbParams sampleKey nonce96
+            where
+                good' params = ciphertext == ocbAesEncrypt params plaintext
 
 prop_OcbDecryptionReversesOcbEncryption :: Property
 prop_OcbDecryptionReversesOcbEncryption
         = forAll (Blind <$> arbitraryKey) $ \(Blind key) ->
           forAll (arbitraryByteStringLength 12) $ \nonce' ->
           forAll arbitraryByteString $ \plaintext ->
-          Just plaintext === ocbAesDecrypt' key nonce'
-                             (ocbAesEncrypt' key nonce' plaintext)
+          maybe (property False)
+                (\params -> Just plaintext
+                            === ocbAesDecrypt params
+                                              (ocbAesEncrypt params plaintext))
+                (buildOcbParams key nonce')

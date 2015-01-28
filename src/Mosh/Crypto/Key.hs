@@ -20,7 +20,7 @@ import Data.Bits.Lens
 
 
 data OcbKey = OcbKey {
-        ocbKey :: AESKey128
+        ocbCipherKey :: AESKey128
       , ocbLStar :: ByteString
       , ocbLDollar :: ByteString
       , ocbLs :: [ByteString]
@@ -30,8 +30,8 @@ ocbLAt :: OcbKey -> Int -> ByteString
 ocbLAt OcbKey{..} i = ocbLs !! i
 
 mkOcbKey :: AESKey128 -> OcbKey
-mkOcbKey ocbKey = OcbKey{..} where
-        ocbLStar = encryptBlock ocbKey zeroes
+mkOcbKey ocbCipherKey = OcbKey{..} where
+        ocbLStar = encryptBlock ocbCipherKey zeroes
         ocbLDollar = double ocbLStar
         ocbLs = iterate double (double ocbLDollar)
 
@@ -39,7 +39,7 @@ buildOcbKey :: ByteString -> Maybe OcbKey
 buildOcbKey = fmap mkOcbKey . buildKey
 
 instance DS.Serialize OcbKey where
-        put = DS.put . ocbKey
+        put = DS.put . ocbCipherKey
         get = mkOcbKey <$> DS.get
 
 

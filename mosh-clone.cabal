@@ -15,6 +15,7 @@ cabal-version:       >=1.10
 library
   exposed-modules:     Mosh
                      , Mosh.Crypto.Key
+                     , Mosh.Crypto.Params
   -- other-modules:       
   -- other-extensions:    
   build-depends:       aeson

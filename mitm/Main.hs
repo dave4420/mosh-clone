@@ -220,19 +220,22 @@ relay server client = join . lift . runConcurrently
                 fragmentIn' :: Maybe (Either String Fragment)
                 fragmentIn' = do
                         p <- packetIn
+                        paramDecrypt <- buildOcbParams keyDecrypt
+                                        $ nonceFromMoshNonce (p ^. packetNonce)
                         bs' <- ocbAesDecrypt
-                                keyDecrypt
-                                (p ^. packetNonce)
+                                paramDecrypt
                                 (p ^. packetPayload)
                         return . decode $ bs'
                 fragmentInDecodingError = hush . flipE =<< fragmentIn'
                 fragmentIn :: Maybe Fragment
                 fragmentIn = hush =<< fragmentIn'
                 packetOut :: Maybe Packet
-                packetOut = Packet <$> (view packetNonce <$> packetIn)
-                                   <*> (ocbAesEncrypt keyEncrypt
-                                        <$> (view packetNonce <$> packetIn)
-                                        <*> (encode <$> fragmentIn))
+                packetOut = do
+                        nonce <- view packetNonce <$> packetIn
+                        paramEncrypt
+                         <- buildOcbParams keyEncrypt $ nonceFromMoshNonce nonce
+                        Packet nonce . ocbAesEncrypt paramEncrypt . encode
+                            <$> fragmentIn
                 bsPacketOut = encode <$> packetOut
 
 
